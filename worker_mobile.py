@@ -1,17 +1,33 @@
-# worker_mobile.py
 import asyncio
 import websockets
 import json
 import uuid
 import psutil
+import os
 
 DEVICE_ID = str(uuid.uuid4())[:8]
-COORDINATOR_URI = "ws://192.168.100.5:5000"
+COORDINATOR_URI = "ws://192.168.100.2:5000"
+
+def get_cpu_free():
+    try:
+        # Try psutil (may fail on Termux due to /proc/stat restriction)
+        cpu_usage = psutil.cpu_percent(interval=0.5)
+        return round(100 - cpu_usage, 2)
+    except PermissionError:
+        # Fallback: use /proc/loadavg
+        try:
+            with open("/proc/loadavg") as f:
+                load1, _, _ = f.read().split()[:3]
+                load1 = float(load1)
+                cores = os.cpu_count() or 1
+                cpu_usage = min(100.0, (load1 / cores) * 100.0)
+                return round(100 - cpu_usage, 2)
+        except Exception:
+            return 0.0
 
 def get_resource_info():
     # CPU usage
-    cpu_usage = psutil.cpu_percent(interval=0.5)
-    cpu_free = round(100 - cpu_usage, 2)
+    cpu_free = get_cpu_free()
 
     # RAM info
     mem = psutil.virtual_memory()
@@ -39,7 +55,6 @@ async def worker_loop():
     while True:
         try:
             async with websockets.connect(COORDINATOR_URI) as websocket:
-                # Register
                 info = get_resource_info()
                 await websocket.send(json.dumps({"type": "register", "device_id": DEVICE_ID, **info}))
                 print(f"[+] Worker {DEVICE_ID} connected to coordinator (Mobile).")
