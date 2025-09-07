@@ -1,54 +1,55 @@
+# worker_mobile.py
 import asyncio
 import websockets
 import json
 import uuid
 import psutil
 import os
+import time
+import subprocess
+import json as jsonlib
 
 DEVICE_ID = str(uuid.uuid4())[:8]
 COORDINATOR_URI = "ws://192.168.100.5:5000"
 
 def get_cpu_free():
     try:
-        # Try psutil (may fail on Termux due to /proc/stat restriction)
-        cpu_usage = psutil.cpu_percent(interval=0.5)
-        return round(100 - cpu_usage, 2)
-    except PermissionError:
-        # Fallback: use /proc/loadavg
+        return round(100 - psutil.cpu_percent(interval=0.5), 2)
+    except Exception:
         try:
-            with open("/proc/loadavg") as f:
-                load1, _, _ = f.read().split()[:3]
-                load1 = float(load1)
-                cores = os.cpu_count() or 1
-                cpu_usage = min(100.0, (load1 / cores) * 100.0)
-                return round(100 - cpu_usage, 2)
+            with open("/proc/stat") as f:
+                cpu_times1 = list(map(int, f.readline().split()[1:]))
+            idle1, total1 = cpu_times1[3], sum(cpu_times1)
+
+            time.sleep(0.3)
+
+            with open("/proc/stat") as f:
+                cpu_times2 = list(map(int, f.readline().split()[1:]))
+            idle2, total2 = cpu_times2[3], sum(cpu_times2)
+
+            usage = (1 - ((idle2 - idle1) / (total2 - total1))) * 100
+            return round(100 - usage, 2)
         except Exception:
             return 0.0
 
-def get_resource_info():
-    # CPU usage
-    cpu_free = get_cpu_free()
-
-    # RAM info
+def get_ram_free_mb():
     mem = psutil.virtual_memory()
-    ram_free_mb = mem.available // (1024 * 1024)
+    swap = psutil.swap_memory()
+    total_free_mb = (mem.available + swap.free) // (1024 * 1024)
+    return total_free_mb
 
-    # Battery info
-    battery_info = {}
+def get_battery_info():
     try:
-        battery = psutil.sensors_battery()
-        if battery:
-            battery_info = {
-                "percent": battery.percent,
-                "plugged": battery.power_plugged
-            }
+        out = subprocess.check_output(["termux-battery-status"])
+        return jsonlib.loads(out.decode())
     except Exception:
-        battery_info = {}
+        return {}
 
+def get_resource_info():
     return {
-        "cpu_free": cpu_free,
-        "ram_free_mb": ram_free_mb,
-        "battery": battery_info
+        "cpu_free": get_cpu_free(),
+        "ram_free_mb": get_ram_free_mb(),
+        "battery": get_battery_info()
     }
 
 async def worker_loop():
