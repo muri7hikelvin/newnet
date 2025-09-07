@@ -6,7 +6,7 @@ import psutil
 import os
 
 DEVICE_ID = str(uuid.uuid4())[:8]
-COORDINATOR_URI = "ws://192.168.100.2:5000"
+COORDINATOR_URI = "ws://192.168.100.5:5000"
 
 def get_cpu_free():
     try:
