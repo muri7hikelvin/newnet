@@ -1,16 +1,13 @@
 # workers.py
-# worker.py
 import asyncio
 import websockets
 import json
-import psutil
 import socket
 import uuid
+import os
 
 DEVICE_ID = str(uuid.uuid4())[:8]  # unique ID for each worker
-COORDINATOR_URI = "ws://192.168.100.2:5000"
-
-import os
+COORDINATOR_URI = "ws://192.168.100.2:5000"  # your laptop IP
 
 def get_resource_info():
     # Dummy CPU (since psutil not allowed on Android without root)
@@ -33,7 +30,6 @@ def get_resource_info():
         "ram_free_mb": ram_free_mb
     }
 
-
 async def worker_loop():
     async with websockets.connect(COORDINATOR_URI) as websocket:
         # Register once at start
@@ -43,7 +39,6 @@ async def worker_loop():
             "device_id": DEVICE_ID,
             **info
         }))
-
         print(f"[+] Worker {DEVICE_ID} connected to coordinator.")
 
         # Keep sending heartbeats with free resources
