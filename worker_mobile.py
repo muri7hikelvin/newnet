@@ -5,7 +5,6 @@ import json
 import uuid
 import psutil
 import os
-import time
 import subprocess
 import json as jsonlib
 
@@ -14,29 +13,18 @@ COORDINATOR_URI = "ws://192.168.100.5:5000"
 
 def get_cpu_free():
     try:
-        return round(100 - psutil.cpu_percent(interval=0.5), 2)
-    except Exception:
-        try:
-            with open("/proc/stat") as f:
-                cpu_times1 = list(map(int, f.readline().split()[1:]))
-            idle1, total1 = cpu_times1[3], sum(cpu_times1)
-
-            time.sleep(0.3)
-
-            with open("/proc/stat") as f:
-                cpu_times2 = list(map(int, f.readline().split()[1:]))
-            idle2, total2 = cpu_times2[3], sum(cpu_times2)
-
-            usage = (1 - ((idle2 - idle1) / (total2 - total1))) * 100
+        with open("/proc/loadavg") as f:
+            load1, _, _ = f.read().split()[:3]
+            load1 = float(load1)
+            cores = os.cpu_count() or 1
+            usage = min(100.0, (load1 / cores) * 100.0)
             return round(100 - usage, 2)
-        except Exception:
-            return 0.0
+    except Exception:
+        return 0.0
 
 def get_ram_free_mb():
     mem = psutil.virtual_memory()
-    swap = psutil.swap_memory()
-    total_free_mb = (mem.available + swap.free) // (1024 * 1024)
-    return total_free_mb
+    return mem.available // (1024 * 1024)
 
 def get_battery_info():
     try:
