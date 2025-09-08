@@ -17,144 +17,183 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="psutil")
 DEVICE_ID = str(uuid.uuid4())[:8]
 COORDINATOR_URI = "ws://192.168.100.5:5000"
 
-def get_cpu_free() -> float:
-    """Get CPU free percentage with Android-optimized fallbacks"""
+def get_android_memory_info():
+    """Get accurate Android memory information from /proc/meminfo"""
+    meminfo = {}
     try:
-        # First try psutil with a shorter interval for mobile
-        return round(100 - psutil.cpu_percent(interval=0.3), 2)
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    key = parts[0].rstrip(':')
+                    try:
+                        value = int(parts[1])
+                        meminfo[key] = value
+                    except ValueError:
+                        pass
+        return meminfo
     except Exception:
-        try:
-            # Fallback: manual /proc/stat reading
-            with open("/proc/stat") as f:
-                cpu_times1 = list(map(int, f.readline().split()[1:]))
-            idle1, total1 = cpu_times1[3], sum(cpu_times1)
-            time.sleep(0.2)  # Shorter sleep for mobile
-            with open("/proc/stat") as f:
-                cpu_times2 = list(map(int, f.readline().split()[1:]))
-            idle2, total2 = cpu_times2[3], sum(cpu_times2)
+        return {}
+
+def get_cpu_free() -> float:
+    """Get accurate CPU free percentage for Android"""
+    try:
+        # Read /proc/stat for accurate CPU measurement
+        with open("/proc/stat") as f:
+            first_line = f.readline().strip()
+            if not first_line.startswith('cpu '):
+                return 50.0  # Fallback
             
-            if total2 - total1 > 0:  # Avoid division by zero
-                usage = (1 - ((idle2 - idle1) / (total2 - total1))) * 100
-                return round(100 - usage, 2)
-            else:
-                return 0.0
-        except Exception:
-            # Final fallback: try to get load average
-            try:
-                with open("/proc/loadavg") as f:
-                    load = float(f.read().split()[0])
-                # Rough estimation: assume 4 cores, convert load to CPU free %
-                cpu_cores = os.cpu_count() or 4
-                usage = min((load / cpu_cores) * 100, 100)
-                return round(100 - usage, 2)
-            except Exception:
-                return 50.0  # Default reasonable value
+            parts = first_line.split()
+            if len(parts) < 8:
+                return 50.0
+                
+            # Calculate total and idle time
+            user, nice, system, idle, iowait, irq, softirq = map(int, parts[1:8])
+            total = user + nice + system + idle + iowait + irq + softirq
+            return round((idle / total) * 100, 2)
+            
+    except Exception:
+        return 50.0
 
 def get_ram_free_mb() -> int:
-    """Get available RAM in MB with Android-optimized approach"""
+    """Get accurate available RAM in MB for Android"""
     try:
-        mem = psutil.virtual_memory()
-        # Don't rely on swap memory on Android as it often fails
-        return mem.available // (1024 * 1024)
+        meminfo = get_android_memory_info()
+        if not meminfo:
+            # Fallback to psutil
+            mem = psutil.virtual_memory()
+            return mem.available // (1024 * 1024)
+        
+        # Calculate available memory (Android specific)
+        # MemAvailable is the most accurate if available
+        if 'MemAvailable' in meminfo:
+            return meminfo['MemAvailable'] // 1024
+        
+        # Fallback calculation for older Android versions
+        mem_free = meminfo.get('MemFree', 0)
+        cached = meminfo.get('Cached', 0)
+        buffers = meminfo.get('Buffers', 0)
+        available = mem_free + cached + buffers
+        return available // 1024
+        
     except Exception:
-        try:
-            # Fallback: read /proc/meminfo directly
-            meminfo = {}
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        key, value = parts[0], int(parts[1])
-                        meminfo[key[:-1]] = value  # Remove ':' from key
-            
-            # Calculate available memory
-            available = meminfo.get('MemAvailable', 0)
-            if available == 0:
-                # Fallback calculation if MemAvailable not present
-                free = meminfo.get('MemFree', 0)
-                buffers = meminfo.get('Buffers', 0)
-                cached = meminfo.get('Cached', 0)
-                available = free + buffers + cached
-            
-            return available // 1024  # Convert KB to MB
-        except Exception:
-            return 0
+        return 0
 
 def get_battery_info() -> Dict[str, Any]:
-    """Get battery information with error handling"""
+    """Get battery information with multiple fallback methods"""
+    # Method 1: Try termux-battery-status
     try:
-        # Check if termux-api is available
         result = subprocess.run(
             ["termux-battery-status"], 
             capture_output=True, 
             text=True, 
-            timeout=3  # 3 second timeout
+            timeout=3
         )
         if result.returncode == 0:
             battery_data = json.loads(result.stdout)
-            # Ensure we have the expected fields
-            if "percentage" not in battery_data:
-                battery_data["percentage"] = 100  # Default value
-            if "status" not in battery_data:
-                battery_data["status"] = "unknown"
-            return battery_data
-        else:
-            # Return default values if termux-api fails
-            return {"percentage": 100, "status": "unknown", "error": "termux-api failed"}
-    except subprocess.TimeoutExpired:
-        return {"percentage": 100, "status": "unknown", "error": "battery status timeout"}
-    except json.JSONDecodeError:
-        return {"percentage": 100, "status": "unknown", "error": "invalid battery status response"}
-    except FileNotFoundError:
-        return {"percentage": 100, "status": "unknown", "error": "termux-battery-status command not found"}
-    except Exception as e:
-        return {"percentage": 100, "status": "unknown", "error": f"battery status failed: {str(e)}"}
+            if "percentage" in battery_data and "status" in battery_data:
+                return battery_data
+    except Exception:
+        pass
+    
+    # Method 2: Try reading from sysfs (Android battery interface)
+    try:
+        # Common battery paths in Android
+        battery_paths = [
+            "/sys/class/power_supply/battery/",
+            "/sys/class/power_supply/Battery/",
+            "/sys/class/power_supply/ac/",
+        ]
+        
+        for base_path in battery_paths:
+            try:
+                capacity_path = base_path + "capacity"
+                status_path = base_path + "status"
+                
+                if os.path.exists(capacity_path) and os.path.exists(status_path):
+                    with open(capacity_path, 'r') as f:
+                        percentage = int(f.read().strip())
+                    
+                    with open(status_path, 'r') as f:
+                        status = f.read().strip().lower()
+                    
+                    return {
+                        "percentage": percentage,
+                        "status": status,
+                        "source": "sysfs"
+                    }
+            except Exception:
+                continue
+    except Exception:
+        pass
+    
+    # Method 3: Final fallback
+    return {"percentage": 100, "status": "unknown", "error": "battery status unavailable"}
 
 def get_storage_info() -> Dict[str, Any]:
-    """Get storage information with Android fallbacks"""
+    """Get accurate storage information for Android"""
     try:
-        # Try psutil first
-        usage = psutil.disk_usage('/')
+        # Try using df command for accurate Android storage info
+        result = subprocess.run(
+            ["df", "/data", "-B1", "--output=size,used,avail,pcent"], 
+            capture_output=True, 
+            text=True, 
+            timeout=3
+        )
+        
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            if len(lines) > 1:
+                parts = lines[1].split()
+                if len(parts) >= 4:
+                    total_bytes = int(parts[0])
+                    used_bytes = int(parts[1])
+                    free_bytes = int(parts[2])
+                    used_percent = int(parts[3].rstrip('%'))
+                    
+                    return {
+                        "total_gb": round(total_bytes / (1024**3), 2),
+                        "free_gb": round(free_bytes / (1024**3), 2),
+                        "used_percent": used_percent
+                    }
+    except Exception:
+        pass
+    
+    # Fallback: try psutil
+    try:
+        usage = psutil.disk_usage('/data')
         return {
             "total_gb": round(usage.total / (1024**3), 2),
             "free_gb": round(usage.free / (1024**3), 2),
             "used_percent": round((usage.used / usage.total) * 100, 2)
         }
     except Exception:
-        try:
-            # Fallback: use df command
-            result = subprocess.run(
-                ["df", "/data", "-B1"],  # Get bytes for /data partition
-                capture_output=True, 
-                text=True, 
-                timeout=3
-            )
-            if result.returncode == 0:
-                lines = result.stdout.strip().split('\n')
-                if len(lines) > 1:
-                    parts = lines[1].split()
-                    if len(parts) >= 4:
-                        total_bytes = int(parts[1])
-                        free_bytes = int(parts[3])
-                        used_percent = 100 - (free_bytes / total_bytes * 100)
-                        return {
-                            "total_gb": round(total_bytes / (1024**3), 2),
-                            "free_gb": round(free_bytes / (1024**3), 2),
-                            "used_percent": round(used_percent, 2)
-                        }
-        except Exception:
-            pass
-        
-        # Final fallback: return default values
+        # Final fallback with reasonable defaults
         return {"total_gb": 128.0, "free_gb": 64.0, "used_percent": 50.0}
 
 def get_network_info() -> Dict[str, Any]:
-    """Get basic network connectivity info"""
+    """Get network connectivity info"""
     try:
-        # Simple connectivity check
+        # Check if we have any network interface with an IP address
+        result = subprocess.run(
+            ["ip", "addr", "show"], 
+            capture_output=True, 
+            text=True, 
+            timeout=3
+        )
+        if result.returncode == 0:
+            # Look for inet (IPv4) addresses that aren't localhost
+            lines = result.stdout.split('\n')
+            for line in lines:
+                if 'inet ' in line and '127.0.0.1' not in line and '::1' not in line:
+                    return {"connected": True}
+        
+        # Fallback to socket test
         import socket
         socket.create_connection(("8.8.8.8", 53), timeout=3)
         return {"connected": True}
+        
     except Exception:
         return {"connected": False}
 
@@ -162,12 +201,24 @@ def get_device_info() -> Dict[str, Any]:
     """Get device-specific information"""
     info = {
         "platform": "android",
-        "cpu_count": os.cpu_count(),
-        "device_id": DEVICE_ID
+        "cpu_count": os.cpu_count() or 8,  # Default to 8 if unavailable
+        "device_id": DEVICE_ID,
+        "total_ram_mb": 0
     }
     
+    # Get total RAM
     try:
-        # Try to get Android version
+        meminfo = get_android_memory_info()
+        if 'MemTotal' in meminfo:
+            info["total_ram_mb"] = meminfo['MemTotal'] // 1024
+        else:
+            # Estimate based on common Android device RAM sizes
+            info["total_ram_mb"] = 8192  # 8GB default
+    except Exception:
+        info["total_ram_mb"] = 8192
+    
+    # Get Android version
+    try:
         result = subprocess.run(
             ["getprop", "ro.build.version.release"], 
             capture_output=True, 
@@ -177,19 +228,44 @@ def get_device_info() -> Dict[str, Any]:
         if result.returncode == 0:
             info["android_version"] = result.stdout.strip()
     except Exception:
-        pass
+        info["android_version"] = "unknown"
         
+    # Get device model
+    try:
+        result = subprocess.run(
+            ["getprop", "ro.product.model"], 
+            capture_output=True, 
+            text=True, 
+            timeout=2
+        )
+        if result.returncode == 0:
+            info["model"] = result.stdout.strip()
+    except Exception:
+        pass
+    
     return info
 
 def get_resource_info() -> Dict[str, Any]:
     """Get comprehensive resource information"""
+    cpu_free = get_cpu_free()
+    ram_free_mb = get_ram_free_mb()
+    device_info = get_device_info()
+    total_ram_mb = device_info.get("total_ram_mb", 8192)
+    
+    # Calculate RAM usage percentage
+    ram_used_percent = 0
+    if total_ram_mb > 0:
+        ram_used_percent = round(((total_ram_mb - ram_free_mb) / total_ram_mb) * 100, 2)
+    
     return {
-        "cpu_free": get_cpu_free(),
-        "ram_free_mb": get_ram_free_mb(),
+        "cpu_free": cpu_free,
+        "ram_free_mb": ram_free_mb,
+        "ram_used_percent": ram_used_percent,
+        "total_ram_mb": total_ram_mb,
         "battery": get_battery_info(),
         "storage": get_storage_info(),
         "network": get_network_info(),
-        "device": get_device_info(),
+        "device": device_info,
         "timestamp": time.time()
     }
 
@@ -204,9 +280,9 @@ async def worker_loop():
             
             async with websockets.connect(
                 COORDINATOR_URI,
-                ping_interval=30,  # Send ping every 30 seconds
-                ping_timeout=10,   # Wait 10 seconds for pong
-                close_timeout=10   # Wait 10 seconds when closing
+                ping_interval=30,
+                ping_timeout=10,
+                close_timeout=10
             ) as websocket:
                 
                 # Register with coordinator
@@ -216,16 +292,18 @@ async def worker_loop():
                     "device_id": DEVICE_ID,
                     "cpu_free": info["cpu_free"],
                     "ram_free_mb": info["ram_free_mb"],
+                    "ram_used_percent": info["ram_used_percent"],
+                    "total_ram_mb": info["total_ram_mb"],
                     "battery": info["battery"],
                     "storage": info["storage"],
                     "network": info["network"],
                     "device": info["device"]
                 }
                 await websocket.send(json.dumps(register_msg))
-                print(f"[+] Worker {DEVICE_ID} registered with coordinator (Mobile).")
+                print(f"[+] Worker {DEVICE_ID} registered with coordinator")
                 print(f"    CPU: {info['cpu_free']}% free")
-                print(f"    RAM: {info['ram_free_mb']}MB free")
-                print(f"    Battery: {info['battery'].get('percentage', 'N/A')}%")
+                print(f"    RAM: {info['ram_free_mb']}MB free ({info['ram_used_percent']}% used of {info['total_ram_mb']}MB total)")
+                print(f"    Battery: {info['battery'].get('percentage', 'N/A')}% ({info['battery'].get('status', 'unknown')})")
                 print(f"    Storage: {info['storage'].get('free_gb', 'N/A')}GB free")
                 
                 # Wait for registration acknowledgment
@@ -237,10 +315,11 @@ async def worker_loop():
                 except asyncio.TimeoutError:
                     print("[!] No registration acknowledgment received")
                 
-                # Reset reconnect delay on successful connection
+                # Reset reconnect delay
                 reconnect_delay = 5
                 
                 # Main heartbeat loop
+                heartbeat_count = 0
                 while True:
                     try:
                         info = get_resource_info()
@@ -249,23 +328,32 @@ async def worker_loop():
                             "device_id": DEVICE_ID,
                             "cpu_free": info["cpu_free"],
                             "ram_free_mb": info["ram_free_mb"],
+                            "ram_used_percent": info["ram_used_percent"],
+                            "total_ram_mb": info["total_ram_mb"],
                             "battery": info["battery"],
                             "storage": info["storage"],
                             "network": info["network"],
                             "device": info["device"]
                         }
                         await websocket.send(json.dumps(heartbeat_msg))
+                        heartbeat_count += 1
                         
-                        # Wait for heartbeat acknowledgment
+                        # Log heartbeat locally every 5th time
+                        if heartbeat_count % 5 == 0:
+                            print(f"[♥] Heartbeat #{heartbeat_count}: "
+                                  f"CPU: {info['cpu_free']}% free, "
+                                  f"RAM: {info['ram_free_mb']}MB free")
+                        
+                        # Wait for acknowledgment
                         try:
                             response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
                             response_data = json.loads(response)
                             if response_data.get("type") == "heartbeat_ack":
-                                pass  # Heartbeat acknowledged
+                                pass
                         except asyncio.TimeoutError:
                             print("[!] No heartbeat acknowledgment received")
                             
-                        await asyncio.sleep(5)  # Send heartbeat every 5 seconds
+                        await asyncio.sleep(5)
                             
                     except Exception as e:
                         print(f"[!] Error in heartbeat loop: {e}")
@@ -275,8 +363,6 @@ async def worker_loop():
             print(f"[!] Connection failed: {e}")
             print(f"[+] Retrying in {reconnect_delay}s...")
             await asyncio.sleep(reconnect_delay)
-            
-            # Exponential backoff with maximum delay
             reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
 
 def main():
@@ -286,12 +372,12 @@ def main():
     
     # Test resource functions first
     print("\n[+] Testing resource monitoring functions:")
-    print(f"    CPU Free: {get_cpu_free()}%")
-    print(f"    RAM Free: {get_ram_free_mb()}MB")
-    battery = get_battery_info()
-    print(f"    Battery: {battery.get('percentage', 'N/A')}% ({battery.get('status', 'unknown')})")
-    storage = get_storage_info()
-    print(f"    Storage: {storage.get('free_gb', 'N/A')}GB free")
+    info = get_resource_info()
+    print(f"    CPU Free: {info['cpu_free']}%")
+    print(f"    RAM Free: {info['ram_free_mb']}MB ({info['ram_used_percent']}% used of {info['total_ram_mb']}MB total)")
+    print(f"    Battery: {info['battery'].get('percentage', 'N/A')}% ({info['battery'].get('status', 'unknown')})")
+    print(f"    Storage: {info['storage'].get('free_gb', 'N/A')}GB free")
+    print(f"    Network: {'Connected' if info['network'].get('connected') else 'Disconnected'}")
     
     try:
         asyncio.run(worker_loop())
