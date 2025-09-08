@@ -38,20 +38,52 @@ def get_android_memory_info():
 def get_cpu_free() -> float:
     """Get accurate CPU free percentage for Android"""
     try:
-        # Read /proc/stat for accurate CPU measurement
-        with open("/proc/stat") as f:
-            first_line = f.readline().strip()
-            if not first_line.startswith('cpu '):
-                return 50.0  # Fallback
+        # Method 1: Use psutil (most reliable)
+        try:
+            # Get CPU usage over a short interval
+            usage = psutil.cpu_percent(interval=0.5)
+            return round(100 - usage, 2)
+        except Exception:
+            pass
+        
+        # Method 2: Calculate from /proc/stat (more accurate)
+        def get_cpu_times():
+            try:
+                with open("/proc/stat") as f:
+                    lines = f.readlines()
+                for line in lines:
+                    if line.startswith('cpu '):
+                        return list(map(int, line.split()[1:]))
+                return None
+            except:
+                return None
+        
+        # Get two samples with delay to calculate usage
+        times1 = get_cpu_times()
+        if times1 is None:
+            return 50.0
             
-            parts = first_line.split()
-            if len(parts) < 8:
-                return 50.0
-                
-            # Calculate total and idle time
-            user, nice, system, idle, iowait, irq, softirq = map(int, parts[1:8])
-            total = user + nice + system + idle + iowait + irq + softirq
-            return round((idle / total) * 100, 2)
+        time.sleep(0.3)
+        times2 = get_cpu_times()
+        if times2 is None:
+            return 50.0
+        
+        # Calculate CPU usage between the two samples
+        # CPU times: user, nice, system, idle, iowait, irq, softirq
+        prev_idle = times1[3] + times1[4]  # idle + iowait
+        prev_total = sum(times1)
+        
+        idle = times2[3] + times2[4]  # idle + iowait
+        total = sum(times2)
+        
+        total_delta = total - prev_total
+        idle_delta = idle - prev_idle
+        
+        if total_delta > 0:
+            usage_percent = 100.0 * (1.0 - idle_delta / total_delta)
+            return round(100 - usage_percent, 2)
+        else:
+            return 50.0
             
     except Exception:
         return 50.0
@@ -82,53 +114,118 @@ def get_ram_free_mb() -> int:
 
 def get_battery_info() -> Dict[str, Any]:
     """Get battery information with multiple fallback methods"""
-    # Method 1: Try termux-battery-status
+    # Method 1: Try termux-battery-status (shorter timeout)
     try:
         result = subprocess.run(
             ["termux-battery-status"], 
             capture_output=True, 
             text=True, 
-            timeout=3
+            timeout=2  # Shorter timeout
         )
         if result.returncode == 0:
             battery_data = json.loads(result.stdout)
             if "percentage" in battery_data and "status" in battery_data:
+                print("[DEBUG] Battery via termux-api")
                 return battery_data
     except Exception:
         pass
     
-    # Method 2: Try reading from sysfs (Android battery interface)
+    # Method 2: Try dumpsys battery (Android system command)
     try:
-        # Common battery paths in Android
-        battery_paths = [
-            "/sys/class/power_supply/battery/",
-            "/sys/class/power_supply/Battery/",
-            "/sys/class/power_supply/ac/",
-        ]
-        
-        for base_path in battery_paths:
-            try:
-                capacity_path = base_path + "capacity"
-                status_path = base_path + "status"
+        result = subprocess.run(
+            ["dumpsys", "battery"], 
+            capture_output=True, 
+            text=True, 
+            timeout=3
+        )
+        if result.returncode == 0:
+            output = result.stdout
+            percentage = None
+            status = "unknown"
+            plugged = 0
+            
+            # Parse dumpsys output
+            for line in output.split('\n'):
+                line = line.strip()
+                if 'level:' in line:
+                    try:
+                        percentage = int(line.split(':')[1].strip())
+                    except:
+                        pass
+                elif 'status:' in line:
+                    status = line.split(':')[1].strip().lower()
+                elif 'plugged:' in line:
+                    plugged = int(line.split(':')[1].strip())
+            
+            if percentage is not None:
+                # Convert plugged status to charging status
+                if plugged > 0:
+                    status = "charging"
+                elif status == "2":  # Android status 2 means charging
+                    status = "charging"
+                elif status == "5":  # Android status 5 means full
+                    status = "full"
+                else:
+                    status = "discharging"
                 
-                if os.path.exists(capacity_path) and os.path.exists(status_path):
-                    with open(capacity_path, 'r') as f:
-                        percentage = int(f.read().strip())
+                print(f"[DEBUG] Battery via dumpsys: {percentage}%")
+                return {"percentage": percentage, "status": status, "source": "dumpsys"}
+    except Exception as e:
+        print(f"[DEBUG] dumpsys failed: {e}")
+        pass
+    
+    # Method 3: Try reading from sysfs (Android battery interface)
+    try:
+        # Look for battery directories
+        battery_dirs = []
+        try:
+            battery_dirs = os.listdir('/sys/class/power_supply/')
+        except:
+            pass
+        
+        for dir_name in battery_dirs:
+            if 'battery' in dir_name.lower() or 'bat' in dir_name.lower():
+                base_path = f'/sys/class/power_supply/{dir_name}/'
+                try:
+                    capacity_path = base_path + 'capacity'
+                    status_path = base_path + 'status'
                     
-                    with open(status_path, 'r') as f:
-                        status = f.read().strip().lower()
-                    
-                    return {
-                        "percentage": percentage,
-                        "status": status,
-                        "source": "sysfs"
-                    }
-            except Exception:
-                continue
+                    if os.path.exists(capacity_path) and os.path.exists(status_path):
+                        with open(capacity_path, 'r') as f:
+                            percentage = int(f.read().strip())
+                        
+                        with open(status_path, 'r') as f:
+                            status = f.read().strip().lower()
+                        
+                        print(f"[DEBUG] Battery via sysfs: {percentage}%")
+                        return {
+                            "percentage": percentage,
+                            "status": status,
+                            "source": "sysfs"
+                        }
+                except Exception:
+                    continue
     except Exception:
         pass
     
-    # Method 3: Final fallback
+    # Method 4: Final fallback - try to detect charging via power supply
+    try:
+        # Check common charging indicator paths
+        charging_paths = [
+            "/sys/class/power_supply/usb/online",
+            "/sys/class/power_supply/ac/online",
+            "/sys/class/power_supply/wireless/online"
+        ]
+        
+        for path in charging_paths:
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    if f.read().strip() == "1":
+                        return {"percentage": 100, "status": "charging", "source": "charging_detect"}
+    except Exception:
+        pass
+    
+    # Final fallback
     return {"percentage": 100, "status": "unknown", "error": "battery status unavailable"}
 
 def get_storage_info() -> Dict[str, Any]:
@@ -360,6 +457,39 @@ def main():
     info = get_resource_info()
     print(f"    CPU Free: {info['cpu_free']}%")
     print(f"    RAM Free: {info['ram_free_mb']}MB ({info['ram_used_percent']}% used of {info['total_ram_mb']}MB total)")
+
+        # In your main() function, add more detailed battery debugging:
+        print("\n[+] Testing battery detection methods:")
+        print("    Trying termux-battery-status...")
+        try:
+            result = subprocess.run(["which", "termux-battery-status"], capture_output=True, text=True)
+            if result.returncode == 0:
+                print("    ✓ termux-battery-status is available")
+            else:
+                print("    ✗ termux-battery-status not found")
+        except:
+            print("    ✗ termux-battery-status check failed")
+        
+        print("    Trying dumpsys...")
+        try:
+            result = subprocess.run(["which", "dumpsys"], capture_output=True, text=True)
+            if result.returncode == 0:
+                print("    ✓ dumpsys is available")
+            else:
+                print("    ✗ dumpsys not found")
+        except:
+            print("    ✗ dumpsys check failed")
+        
+        print("    Checking sysfs battery paths...")
+        try:
+            if os.path.exists('/sys/class/power_supply/'):
+                items = os.listdir('/sys/class/power_supply/')
+                print(f"    Found power_supply items: {items}")
+            else:
+                print("    ✗ /sys/class/power_supply/ not found")
+        except:
+            print("    ✗ sysfs check failed")
+    
     print(f"    Battery: {info['battery'].get('percentage', 'N/A')}% ({info['battery'].get('status', 'unknown')})")
     print(f"    Storage: {info['storage'].get('free_gb', 'N/A')}GB free")
     print(f"    Network: {'Connected' if info['network'].get('connected') else 'Disconnected'}")
