@@ -15,7 +15,7 @@ from typing import Dict, Any
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="psutil")
 
 DEVICE_ID = str(uuid.uuid4())[:8]
-COORDINATOR_URI = "ws://192.168.100.10:5000"
+COORDINATOR_URI = "ws://192.168.105.10:5000"
 
 def get_android_memory_info():
     """Get accurate Android memory information from /proc/meminfo"""
