@@ -186,12 +186,20 @@ async def worker_loop():
                 while True:
                     try:
                         info = get_resource_info()
-                        heartbeat_msg = {"type": "heartbeat", **info}
+                        heartbeat_msg = {"type": "heartbeat", "device_id": DEVICE_ID, **info}
                         await websocket.send(json.dumps(heartbeat_msg))
                         
                         # Wait for heartbeat interval or handle incoming messages
                         try:
-                            await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                            message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                            # Handle any incoming messages from coordinator
+                            try:
+                                data = json.loads(message)
+                                msg_type = data.get("type")
+                                if msg_type == "ping":
+                                    await websocket.send(json.dumps({"type": "pong", "device_id": DEVICE_ID}))
+                            except json.JSONDecodeError:
+                                pass  # Ignore invalid JSON
                         except asyncio.TimeoutError:
                             # No message received, continue with next heartbeat
                             pass
