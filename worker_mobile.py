@@ -175,9 +175,27 @@ async def worker_loop():
                 
                 # Register with coordinator
                 info = get_resource_info()
-                register_msg = {"type": "register", **info}
+                register_msg = {
+                    "type": "register", 
+                    "device_id": DEVICE_ID,
+                    "cpu_free": info["cpu_free"],
+                    "ram_free_mb": info["ram_free_mb"],
+                    "battery": info["battery"],
+                    "storage": info["storage"],
+                    "network": info["network"],
+                    "device": info["device"]
+                }
                 await websocket.send(json.dumps(register_msg))
-                print(f"[+] Worker {DEVICE_ID} connected to coordinator (Mobile).")
+                print(f"[+] Worker {DEVICE_ID} registered with coordinator (Mobile).")
+                
+                # Wait for registration acknowledgment
+                try:
+                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                    response_data = json.loads(response)
+                    if response_data.get("type") == "registration_ack":
+                        print(f"[+] Registration acknowledged by coordinator")
+                except asyncio.TimeoutError:
+                    print("[!] No registration acknowledgment received")
                 
                 # Reset reconnect delay on successful connection
                 reconnect_delay = 5
@@ -186,26 +204,28 @@ async def worker_loop():
                 while True:
                     try:
                         info = get_resource_info()
-                        heartbeat_msg = {"type": "heartbeat", "device_id": DEVICE_ID, **info}
+                        heartbeat_msg = {
+                            "type": "heartbeat", 
+                            "device_id": DEVICE_ID,
+                            "cpu_free": info["cpu_free"],
+                            "ram_free_mb": info["ram_free_mb"],
+                            "battery": info["battery"],
+                            "storage": info["storage"],
+                            "network": info["network"],
+                            "device": info["device"]
+                        }
                         await websocket.send(json.dumps(heartbeat_msg))
                         
-                        # Wait for heartbeat interval or handle incoming messages
+                        # Wait for heartbeat acknowledgment
                         try:
-                            message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                            # Handle any incoming messages from coordinator
-                            try:
-                                data = json.loads(message)
-                                msg_type = data.get("type")
-                                if msg_type == "ping":
-                                    await websocket.send(json.dumps({"type": "pong", "device_id": DEVICE_ID}))
-                            except json.JSONDecodeError:
-                                pass  # Ignore invalid JSON
+                            response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                            response_data = json.loads(response)
+                            if response_data.get("type") == "heartbeat_ack":
+                                pass  # Heartbeat acknowledged
                         except asyncio.TimeoutError:
-                            # No message received, continue with next heartbeat
-                            pass
-                        except websockets.exceptions.ConnectionClosed:
-                            print("[!] Connection closed by server")
-                            break
+                            print("[!] No heartbeat acknowledgment received")
+                            
+                        await asyncio.sleep(5)  # Send heartbeat every 5 seconds
                             
                     except Exception as e:
                         print(f"[!] Error in heartbeat loop: {e}")
