@@ -458,37 +458,38 @@ def main():
     print(f"    CPU Free: {info['cpu_free']}%")
     print(f"    RAM Free: {info['ram_free_mb']}MB ({info['ram_used_percent']}% used of {info['total_ram_mb']}MB total)")
 
-        # In your main() function, add more detailed battery debugging:
-        print("\n[+] Testing battery detection methods:")
-        print("    Trying termux-battery-status...")
-        try:
-            result = subprocess.run(["which", "termux-battery-status"], capture_output=True, text=True)
-            if result.returncode == 0:
-                print("    ✓ termux-battery-status is available")
-            else:
-                print("    ✗ termux-battery-status not found")
-        except:
-            print("    ✗ termux-battery-status check failed")
-        
-        print("    Trying dumpsys...")
-        try:
-            result = subprocess.run(["which", "dumpsys"], capture_output=True, text=True)
-            if result.returncode == 0:
-                print("    ✓ dumpsys is available")
-            else:
-                print("    ✗ dumpsys not found")
-        except:
-            print("    ✗ dumpsys check failed")
-        
-        print("    Checking sysfs battery paths...")
-        try:
-            if os.path.exists('/sys/class/power_supply/'):
-                items = os.listdir('/sys/class/power_supply/')
-                print(f"    Found power_supply items: {items}")
-            else:
-                print("    ✗ /sys/class/power_supply/ not found")
-        except:
-            print("    ✗ sysfs check failed")
+
+    # In your main() function, add more detailed battery debugging:
+    print("\n[+] Testing battery detection methods:")
+    print("    Trying termux-battery-status...")
+    try:
+        result = subprocess.run(["which", "termux-battery-status"], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("    ✓ termux-battery-status is available")
+        else:
+            print("    ✗ termux-battery-status not found")
+    except:
+        print("    ✗ termux-battery-status check failed")
+    
+    print("    Trying dumpsys...")
+    try:
+        result = subprocess.run(["which", "dumpsys"], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("    ✓ dumpsys is available")
+        else:
+            print("    ✗ dumpsys not found")
+    except:
+        print("    ✗ dumpsys check failed")
+    
+    print("    Checking sysfs battery paths...")
+    try:
+        if os.path.exists('/sys/class/power_supply/'):
+            items = os.listdir('/sys/class/power_supply/')
+            print(f"    Found power_supply items: {items}")
+        else:
+            print("    ✗ /sys/class/power_supply/ not found")
+    except:
+        print("    ✗ sysfs check failed")
     
     print(f"    Battery: {info['battery'].get('percentage', 'N/A')}% ({info['battery'].get('status', 'unknown')})")
     print(f"    Storage: {info['storage'].get('free_gb', 'N/A')}GB free")
