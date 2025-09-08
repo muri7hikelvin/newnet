@@ -173,27 +173,12 @@ def get_storage_info() -> Dict[str, Any]:
         return {"total_gb": 128.0, "free_gb": 64.0, "used_percent": 50.0}
 
 def get_network_info() -> Dict[str, Any]:
-    """Get network connectivity info"""
+    """Get basic network connectivity info"""
     try:
-        # Check if we have any network interface with an IP address
-        result = subprocess.run(
-            ["ip", "addr", "show"], 
-            capture_output=True, 
-            text=True, 
-            timeout=3
-        )
-        if result.returncode == 0:
-            # Look for inet (IPv4) addresses that aren't localhost
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if 'inet ' in line and '127.0.0.1' not in line and '::1' not in line:
-                    return {"connected": True}
-        
-        # Fallback to socket test
+        # Simple connectivity check
         import socket
         socket.create_connection(("8.8.8.8", 53), timeout=3)
         return {"connected": True}
-        
     except Exception:
         return {"connected": False}
 
