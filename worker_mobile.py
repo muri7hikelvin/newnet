@@ -40,19 +40,26 @@ def get_cpu_free() -> float:
     try:
         # Method 1: Use psutil with shorter interval
         try:
-            cpu_percent = psutil.cpu_percent(interval=0.5)
-            return round(100 - cpu_percent, 2)
+            # Take multiple samples to get a better average
+            cpu_percent1 = psutil.cpu_percent(interval=0.3)
+            time.sleep(0.2)
+            cpu_percent2 = psutil.cpu_percent(interval=0.3)
+            avg_cpu_percent = (cpu_percent1 + cpu_percent2) / 2
+            return round(100 - avg_cpu_percent, 2)
         except Exception:
             pass
         
         # Method 2: Read /proc/stat for more accurate measurement
         def read_cpu_times():
-            with open("/proc/stat") as f:
-                line = f.readline()
-            if line.startswith('cpu '):
-                return list(map(int, line.split()[1:8]))
-            return None
+            try:
+                with open("/proc/stat") as f:
+                    line = f.readline()
+                if line.startswith('cpu '):
+                    return list(map(int, line.split()[1:8]))
+            except:
+                return None
         
+        # Take two samples with delay
         times1 = read_cpu_times()
         if times1 is None:
             return 50.0
@@ -106,13 +113,13 @@ def get_ram_free_mb() -> int:
 
 def get_battery_info() -> Dict[str, Any]:
     """Get battery information with multiple fallback methods"""
-    # Method 1: Try termux-battery-status
+    # Method 1: Try termux-battery-status (with shorter timeout)
     try:
         result = subprocess.run(
             ["termux-battery-status"], 
             capture_output=True, 
             text=True, 
-            timeout=3
+            timeout=1  # Shorter timeout
         )
         if result.returncode == 0:
             battery_data = json.loads(result.stdout)
@@ -120,50 +127,38 @@ def get_battery_info() -> Dict[str, Any]:
                 print(f"[DEBUG] Battery via termux: {battery_data['percentage']}%")
                 return battery_data
     except Exception as e:
-        print(f"[DEBUG] termux-battery-status failed: {e}")
+        pass
     
-    # Method 2: Try dumpsys battery (Android system command)
+    # Method 2: Try to find battery info in /sys/class/power_supply/
     try:
-        result = subprocess.run(
-            ["dumpsys", "battery"], 
-            capture_output=True, 
-            text=True, 
-            timeout=3
-        )
-        if result.returncode == 0:
-            output = result.stdout
-            # Parse dumpsys output
-            percentage = None
-            status = "unknown"
-            
-            for line in output.split('\n'):
-                if 'level:' in line:
-                    try:
-                        percentage = int(line.split(':')[1].strip())
-                    except:
-                        pass
-                elif 'status:' in line:
-                    status = line.split(':')[1].strip().lower()
-            
-            if percentage is not None:
-                print(f"[DEBUG] Battery via dumpsys: {percentage}%")
-                return {"percentage": percentage, "status": status, "source": "dumpsys"}
-    except Exception as e:
-        print(f"[DEBUG] dumpsys battery failed: {e}")
-    
-    # Method 3: Final fallback - try to detect if we're charging via power supply
-    try:
-        # Check if AC power is connected
-        ac_path = "/sys/class/power_supply/ac/online"
-        if os.path.exists(ac_path):
-            with open(ac_path, 'r') as f:
-                ac_online = f.read().strip()
-                if ac_online == "1":
-                    return {"percentage": 100, "status": "charging", "source": "ac_detect"}
+        battery_dirs = [d for d in os.listdir('/sys/class/power_supply/') 
+                       if 'battery' in d.lower() or 'BAT' in d]
+        
+        for bat_dir in battery_dirs:
+            base_path = f'/sys/class/power_supply/{bat_dir}/'
+            try:
+                capacity_path = base_path + 'capacity'
+                status_path = base_path + 'status'
+                
+                if os.path.exists(capacity_path) and os.path.exists(status_path):
+                    with open(capacity_path, 'r') as f:
+                        percentage = int(f.read().strip())
+                    
+                    with open(status_path, 'r') as f:
+                        status = f.read().strip().lower()
+                    
+                    print(f"[DEBUG] Battery via sysfs: {percentage}%")
+                    return {
+                        "percentage": percentage,
+                        "status": status,
+                        "source": "sysfs"
+                    }
+            except Exception:
+                continue
     except Exception:
         pass
     
-    print("[DEBUG] Battery detection all methods failed")
+    # Final fallback - just return unknown status
     return {"percentage": 100, "status": "unknown", "error": "battery status unavailable"}
 
 def get_storage_info() -> Dict[str, Any]:
