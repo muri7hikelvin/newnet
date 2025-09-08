@@ -38,51 +38,20 @@ def get_android_memory_info():
 def get_cpu_free() -> float:
     """Get accurate CPU free percentage for Android"""
     try:
-        # Method 1: Use psutil with shorter interval
-        try:
-            # Take multiple samples to get a better average
-            cpu_percent1 = psutil.cpu_percent(interval=0.3)
-            time.sleep(0.2)
-            cpu_percent2 = psutil.cpu_percent(interval=0.3)
-            avg_cpu_percent = (cpu_percent1 + cpu_percent2) / 2
-            return round(100 - avg_cpu_percent, 2)
-        except Exception:
-            pass
-        
-        # Method 2: Read /proc/stat for more accurate measurement
-        def read_cpu_times():
-            try:
-                with open("/proc/stat") as f:
-                    line = f.readline()
-                if line.startswith('cpu '):
-                    return list(map(int, line.split()[1:8]))
-            except:
-                return None
-        
-        # Take two samples with delay
-        times1 = read_cpu_times()
-        if times1 is None:
-            return 50.0
+        # Read /proc/stat for accurate CPU measurement
+        with open("/proc/stat") as f:
+            first_line = f.readline().strip()
+            if not first_line.startswith('cpu '):
+                return 50.0  # Fallback
             
-        time.sleep(0.5)  # Wait half a second
-        times2 = read_cpu_times()
-        if times2 is None:
-            return 50.0
-        
-        # Calculate CPU usage
-        idle1 = times1[3] + times1[4]  # idle + iowait
-        total1 = sum(times1)
-        
-        idle2 = times2[3] + times2[4]  # idle + iowait
-        total2 = sum(times2)
-        
-        if total2 - total1 > 0:
-            idle_delta = idle2 - idle1
-            total_delta = total2 - total1
-            usage = (1 - (idle_delta / total_delta)) * 100
-            return round(100 - usage, 2)
-        else:
-            return 50.0
+            parts = first_line.split()
+            if len(parts) < 8:
+                return 50.0
+                
+            # Calculate total and idle time
+            user, nice, system, idle, iowait, irq, softirq = map(int, parts[1:8])
+            total = user + nice + system + idle + iowait + irq + softirq
+            return round((idle / total) * 100, 2)
             
     except Exception:
         return 50.0
@@ -113,32 +82,34 @@ def get_ram_free_mb() -> int:
 
 def get_battery_info() -> Dict[str, Any]:
     """Get battery information with multiple fallback methods"""
-    # Method 1: Try termux-battery-status (with shorter timeout)
+    # Method 1: Try termux-battery-status
     try:
         result = subprocess.run(
             ["termux-battery-status"], 
             capture_output=True, 
             text=True, 
-            timeout=1  # Shorter timeout
+            timeout=3
         )
         if result.returncode == 0:
             battery_data = json.loads(result.stdout)
             if "percentage" in battery_data and "status" in battery_data:
-                print(f"[DEBUG] Battery via termux: {battery_data['percentage']}%")
                 return battery_data
-    except Exception as e:
+    except Exception:
         pass
     
-    # Method 2: Try to find battery info in /sys/class/power_supply/
+    # Method 2: Try reading from sysfs (Android battery interface)
     try:
-        battery_dirs = [d for d in os.listdir('/sys/class/power_supply/') 
-                       if 'battery' in d.lower() or 'BAT' in d]
+        # Common battery paths in Android
+        battery_paths = [
+            "/sys/class/power_supply/battery/",
+            "/sys/class/power_supply/Battery/",
+            "/sys/class/power_supply/ac/",
+        ]
         
-        for bat_dir in battery_dirs:
-            base_path = f'/sys/class/power_supply/{bat_dir}/'
+        for base_path in battery_paths:
             try:
-                capacity_path = base_path + 'capacity'
-                status_path = base_path + 'status'
+                capacity_path = base_path + "capacity"
+                status_path = base_path + "status"
                 
                 if os.path.exists(capacity_path) and os.path.exists(status_path):
                     with open(capacity_path, 'r') as f:
@@ -147,7 +118,6 @@ def get_battery_info() -> Dict[str, Any]:
                     with open(status_path, 'r') as f:
                         status = f.read().strip().lower()
                     
-                    print(f"[DEBUG] Battery via sysfs: {percentage}%")
                     return {
                         "percentage": percentage,
                         "status": status,
@@ -158,7 +128,7 @@ def get_battery_info() -> Dict[str, Any]:
     except Exception:
         pass
     
-    # Final fallback - just return unknown status
+    # Method 3: Final fallback
     return {"percentage": 100, "status": "unknown", "error": "battery status unavailable"}
 
 def get_storage_info() -> Dict[str, Any]:
@@ -205,29 +175,7 @@ def get_storage_info() -> Dict[str, Any]:
 def get_network_info() -> Dict[str, Any]:
     """Get network connectivity info"""
     try:
-        # Method 1: Check if we have a route to the coordinator
-        import socket
-        coordinator_ip = COORDINATOR_URI.split("//")[1].split(":")[0]
-        socket.create_connection((coordinator_ip, 5000), timeout=3)
-        return {"connected": True, "type": "direct"}
-    except Exception:
-        pass
-    
-    # Method 2: Check if we have any network interface with internet access
-    try:
-        result = subprocess.run(
-            ["ping", "-c", "1", "8.8.8.8"], 
-            capture_output=True, 
-            text=True, 
-            timeout=3
-        )
-        if result.returncode == 0:
-            return {"connected": True, "type": "internet"}
-    except Exception:
-        pass
-    
-    # Method 3: Check if we have any IP address (local network only)
-    try:
+        # Check if we have any network interface with an IP address
         result = subprocess.run(
             ["ip", "addr", "show"], 
             capture_output=True, 
@@ -239,11 +187,15 @@ def get_network_info() -> Dict[str, Any]:
             lines = result.stdout.split('\n')
             for line in lines:
                 if 'inet ' in line and '127.0.0.1' not in line and '::1' not in line:
-                    return {"connected": True, "type": "local"}
+                    return {"connected": True}
+        
+        # Fallback to socket test
+        import socket
+        socket.create_connection(("8.8.8.8", 53), timeout=3)
+        return {"connected": True}
+        
     except Exception:
-        pass
-    
-    return {"connected": False}
+        return {"connected": False}
 
 def get_device_info() -> Dict[str, Any]:
     """Get device-specific information"""
